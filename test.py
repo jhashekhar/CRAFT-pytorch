@@ -2,8 +2,6 @@
 Copyright (c) 2019-present NAVER Corp.
 MIT License
 """
-
-# -*- coding: utf-8 -*-
 import sys
 import os
 import argparse
@@ -12,19 +10,21 @@ import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
 from torch.autograd import Variable
+import torchvision
+import torchvision.transforms.functional as TF
 
 from PIL import Image
 
 import cv2
 from skimage import io
 import numpy as np
-import craft_utils
-import imgproc
-import file_utils
+import craft_pytorch.craft_utils as craft_utils
+import craft_pytorch.imgproc as imgproc
+import craft_pytorch.file_utils as file_utils
 import json
 import zipfile
 
-from craft import CRAFT
+from craft_pytorch.craft import CRAFT
 
 from collections import OrderedDict
 def copyStateDict(state_dict):
@@ -46,22 +46,22 @@ parser.add_argument('--trained_model', default='weights/craft_mlt_25k.pth', type
 parser.add_argument('--text_threshold', default=0.7, type=float, help='text confidence threshold')
 parser.add_argument('--low_text', default=0.4, type=float, help='text low-bound score')
 parser.add_argument('--link_threshold', default=0.4, type=float, help='link confidence threshold')
-parser.add_argument('--cuda', default=True, type=str2bool, help='Use cuda for inference')
+parser.add_argument('--cuda', default=False, type=str2bool, help='Use cuda for inference')
 parser.add_argument('--canvas_size', default=1280, type=int, help='image size for inference')
 parser.add_argument('--mag_ratio', default=1.5, type=float, help='image magnification ratio')
 parser.add_argument('--poly', default=False, action='store_true', help='enable polygon type')
-parser.add_argument('--test_folder', default='/data/', type=str, help='folder path to input images')
-
 args = parser.parse_args()
 
 
 """ For test images in a folder """
-image_list, _, _ = file_utils.get_files(args.test_folder)
 
 result_folder = './result/'
 if not os.path.isdir(result_folder):
     os.mkdir(result_folder)
 
+current_dir = os.path.join(os.getcwd(), 'uploads')
+image_path = current_dir + '/' + os.listdir(current_dir)[0]
+print(image_path)
 def test_net(net, image, text_threshold, link_threshold, low_text, cuda, poly, refine_net=None):
 
     # resize
@@ -72,8 +72,6 @@ def test_net(net, image, text_threshold, link_threshold, low_text, cuda, poly, r
     x = imgproc.normalizeMeanVariance(img_resized)
     x = torch.from_numpy(x).permute(2, 0, 1)    # [h, w, c] to [c, h, w]
     x = Variable(x.unsqueeze(0))                # [c, h, w] to [b, c, h, w]
-    if cuda:
-        x = x.cuda()
 
     # forward pass
     y, feature = net(x)
@@ -101,34 +99,55 @@ def test_net(net, image, text_threshold, link_threshold, low_text, cuda, poly, r
     return boxes, polys, ret_score_text
 
 
+def labels_and_images(img_path, bboxes_list):
+  # Transforms images into images and save them into a folder
+  list_of_images = []
+  count = 0
+  for i in range(len(bboxes_list)):
+    img = bboxes_list[i]
+
+    x1, y1, x2, y2 = img[0], img[1], img[2], img[7]
+
+    # Reading and saving image as tensors
+    img = Image.open(img_path)
+    x = TF.to_tensor(img)
+
+    # :, second:last, first:third
+    x_t = x[:, y1:y2, x1:x2]
+    dest_dir = '/Users/xanthate/github/flask-tut/bboxes'
+    torchvision.utils.save_image(x_t, '{}/bboxes_{}.jpg'.format(dest_dir, i))
+
+    list_of_images.append('bboxes_{}.jpg'.format(i))
+    count += 1
+  return list_of_images
+
 
 if __name__ == '__main__':
     # load net
     net = CRAFT()     # initialize
 
     print('Loading weights from checkpoint (' + args.trained_model + ')')
-    if args.cuda:
-        net.load_state_dict(copyStateDict(torch.load(args.trained_model)))
-    else:
-        net.load_state_dict(copyStateDict(torch.load(args.trained_model, map_location='cpu')))
 
-    if args.cuda:
-        net = net.cuda()
-        net = torch.nn.DataParallel(net)
-        cudnn.benchmark = False
+    net.load_state_dict(copyStateDict(torch.load(args.trained_model, map_location='cpu')))
 
     net.eval()
 
     # load data
-    for k, image_path in enumerate(image_list):
-        print("Test image {:d}/{:d}: {:s}".format(k+1, len(image_list), image_path), end='\r')
-        image = imgproc.loadImage(image_path)
+    print("Test image {:s}".format(image_path), end='\r')
+    image = imgproc.loadImage(image_path)
 
-        bboxes, polys, score_text = test_net(net, image, args.text_threshold, args.link_threshold, args.low_text, args.cuda, args.poly)
+    bboxes, polys, score_text = test_net(net, image, args.text_threshold, args.link_threshold, args.low_text, args.cuda, args.poly)
 
-        # save score text
-        filename, file_ext = os.path.splitext(os.path.basename(image_path))
-        ########mask_file = result_folder + "/res_" + filename + '_mask.jpg'
-        #cv2.imwrite(mask_file, score_text)
+    # save score text
+    ###################filename, file_ext = os.path.splitext(os.path.basename(image_path))
+    bboxes_list = []
+    for box in bboxes:
+        x = np.array(box).astype(np.int32).reshape((-1))
+        x = x.tolist()
+        bboxes_list.append(x)
+    print("Length of bboxes_list: ", len(bboxes_list))
+    loi = labels_and_images(image_path, bboxes_list)
+    #print(bboxes_list, type(bboxes_list), type(bboxes_list[0]))
 
-        file_utils.saveResult(image_path, image[:,:,::-1], polys, dirname=result_folder)
+
+    #file_utils.saveResult(image_path, image[:,:,::-1], polys, dirname=result_folder)
